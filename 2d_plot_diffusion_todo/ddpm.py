@@ -86,9 +86,8 @@ class DiffusionModule(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Compute xt.
-        alphas_prod_t = extract(self.var_scheduler.alphas_cumprod, t, x0)
-        xt = x0
-
+        alphas_prod_t = extract(self.var_scheduler.alphas_cumprod, t, x0) 
+        xt = alphas_prod_t.sqrt() * x0 + (1.0 - alphas_prod_t).sqrt() * noise
         #######################
 
         return xt
@@ -113,10 +112,26 @@ class DiffusionModule(nn.Module):
         eps_factor = (1 - extract(self.var_scheduler.alphas, t, xt)) / (
             1 - extract(self.var_scheduler.alphas_cumprod, t, xt)
         ).sqrt()
+        # predict noise
         eps_theta = self.network(xt, t)
+        
+        alpha_t = extract(self.var_scheduler.alphas, t, xt)
+        alpha_bar_t = extract(self.var_scheduler.alphas_cumprod, t, xt)
 
-        x_t_prev = xt
+        # mean 계산
+        mean = (xt - eps_factor * eps_theta) / alpha_t.sqrt()
 
+        # posterior variance
+        alpha_bar_t_prev = extract(self.var_scheduler.alphas_cumprod, (t - 1).clamp(min=0), xt)
+        posterior_var = ((1 - alpha_bar_t_prev) / (1 - alpha_bar_t)) * (1 - alpha_t)
+
+        # t>0일 때만 노이즈 추가
+        # algorithm 2 of DDPM paper
+        if int(t.item()) > 0:
+            noise = torch.randn_like(xt)
+            x_t_prev = mean + posterior_var.sqrt() * noise
+        else:
+            x_t_prev = mean
         #######################
         return x_t_prev
 
@@ -133,8 +148,11 @@ class DiffusionModule(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # sample x0 based on Algorithm 2 of DDPM paper.
-        x0_pred = torch.zeros(shape).to(self.device)
-
+        timesteps = self.var_scheduler.timesteps.to(self.device)  # [T-1,...,0]
+        xt = torch.randn(shape, device=self.device)
+        for t in timesteps:
+            xt = self.p_sample(xt, t)
+        x0_pred = xt
         ######################
         return x0_pred
 
@@ -156,12 +174,36 @@ class DiffusionModule(nn.Module):
         # DO NOT change the code outside this part.
         # compute x_t_prev based on ddim reverse process.
         alpha_prod_t = extract(self.var_scheduler.alphas_cumprod, t, xt)
-        if t_prev >= 0:
+        if int(t_prev.item()) >= 0:
             alpha_prod_t_prev = extract(self.var_scheduler.alphas_cumprod, t_prev, xt)
         else:
+            # 마지막 단계에서 alpha_prod_t_prev를 1로 둔다.
             alpha_prod_t_prev = torch.ones_like(alpha_prod_t)
 
-        x_t_prev = xt
+        # predict noise
+        eps_theta = self.network(xt, t)
+
+        # predicted x_0
+        x0_pred = (xt - (1.0 - alpha_prod_t).sqrt() * eps_theta) / alpha_prod_t.sqrt()
+
+        # calculate sigma_t by alpha, eta
+        sigma_t = (
+            eta**2
+            * (1.0 - alpha_prod_t_prev) / (1.0 - alpha_prod_t)
+            * (1.0 - alpha_prod_t / alpha_prod_t_prev)
+        ).sqrt()
+
+        # direction pointing to x_t
+        dir = (1.0 - alpha_prod_t_prev - sigma_t**2).sqrt()
+
+        # z ~ N(0, I)
+        z = torch.randn_like(xt)
+
+        if int(t.item()) > 0:
+            x_t_prev = alpha_prod_t_prev.sqrt() * x0_pred + dir * eps_theta + sigma_t * z
+        else:
+            # x0_pred 항만 남는다.
+            x_t_prev = x0_pred
 
         ######################
         return x_t_prev
@@ -181,20 +223,22 @@ class DiffusionModule(nn.Module):
         ######## TODO ########
         # NOTE: This code is used for assignment 2. You don't need to implement this part for assignment 1.
         # DO NOT change the code outside this part.
-        # sample x0 based on Algorithm 2 of DDPM paper.
+
+        # train step
         step_ratio = self.var_scheduler.num_train_timesteps // num_inference_timesteps
         timesteps = (
             (np.arange(0, num_inference_timesteps) * step_ratio)
-            .round()[::-1]
+            .round()[::-1] # 내림차순으로 정렬
             .copy()
             .astype(np.int64)
         )
-        timesteps = torch.from_numpy(timesteps)
-        prev_timesteps = timesteps - step_ratio
+        timesteps = torch.from_numpy(timesteps).to(self.device) # [980, 960, ... 20, 0]
+        prev_timesteps = timesteps - step_ratio # [960, 940, ... 0, -20]
+        xt = torch.randn(shape, device=self.device)
 
-        xt = torch.zeros(shape).to(self.device)
+        # 0은 p_sample에서 handle
         for t, t_prev in zip(timesteps, prev_timesteps):
-            pass
+            xt = self.ddim_p_sample(xt, t, t_prev, eta=eta)
 
         x0_pred = xt
 
@@ -214,6 +258,7 @@ class DiffusionModule(nn.Module):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # compute noise matching loss.
+        # 균등분포로 t 샘플링
         batch_size = x0.shape[0]
         t = (
             torch.randint(0, self.var_scheduler.num_train_timesteps, size=(batch_size,))
@@ -221,8 +266,17 @@ class DiffusionModule(nn.Module):
             .long()
         )
 
-        loss = x0.mean()
-
+        # noise
+        eps = torch.randn_like(x0)
+        
+        # forward process
+        xt = self.q_sample(x0, t, noise=eps)
+        
+        # predict noise
+        eps_theta = self.network(xt, t)
+        
+        # compute loss
+        loss = F.mse_loss(eps_theta, eps)
         ######################
         return loss
 

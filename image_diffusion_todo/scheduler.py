@@ -16,6 +16,7 @@ class BaseScheduler(nn.Module):
             np.arange(0, self.num_train_timesteps)[::-1].copy().astype(np.int64)
         )
 
+        # linear schedule 또는 quad schedule
         if mode == "linear":
             betas = torch.linspace(beta_1, beta_T, steps=num_train_timesteps)
         elif mode == "quad":
@@ -71,6 +72,8 @@ class DDPMScheduler(BaseScheduler):
 
         self.register_buffer("sigmas", sigmas)
 
+    # ddpm.py의 p_sample()와 동일
+    # model.py의 sample()에서 call 됨.
     def step(self, x_t: torch.Tensor, t: int, eps_theta: torch.Tensor):
         """
         One step denoising function of DDPM: x_t -> x_{t-1}.
@@ -86,16 +89,39 @@ class DDPMScheduler(BaseScheduler):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Assignment 1. Implement the DDPM reverse step.
-        sample_prev = None
+        # 주의할 점 : x_t와 t가 같은 device에 있어야 함.
+        t_tensor = torch.full((x_t.shape[0],), t, device=x_t.device)
+        
+        alpha_t  = self._get_teeth(self.alphas, t_tensor)
+        alpha_bar_t   = self._get_teeth(self.alphas_cumprod, t_tensor)
+        sigma_t  = self._get_teeth(self.sigmas, t_tensor)
+
+        eps_factor = (1 - alpha_t) / (
+            1 - alpha_bar_t
+        ).sqrt()
+
+        # mean 계산
+        mean = (x_t - eps_factor * eps_theta) / alpha_t.sqrt()
+
+        # t>1일 때만 노이즈 추가
+        # algorithm 2 of DDPM paper
+        if t > 1:
+            noise = torch.randn_like(x_t)
+            sample_prev = mean + sigma_t * noise
+        else:
+            sample_prev = mean
         #######################
         
         return sample_prev
     
+    # extract()와 동일
+    # 배열 에서 t 에 대응하는 값 추출
     # https://nn.labml.ai/diffusion/ddpm/utils.html
     def _get_teeth(self, consts: torch.Tensor, t: torch.Tensor): # get t th const 
         const = consts.gather(-1, t)
         return const.reshape(-1, 1, 1, 1)
     
+    # ddpm.py의 q_sample()와 동일
     def add_noise(
         self,
         x_0: torch.Tensor,
@@ -120,7 +146,8 @@ class DDPMScheduler(BaseScheduler):
         ######## TODO ########
         # DO NOT change the code outside this part.
         # Assignment 1. Implement the DDPM forward step.
-        x_t = None
+        alphas_prod_t  = self._get_teeth(self.alphas_cumprod, t)
+        x_t = alphas_prod_t.sqrt() * x_0 + (1.0 - alphas_prod_t).sqrt() * eps
         #######################
 
         return x_t, eps

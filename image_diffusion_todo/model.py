@@ -50,22 +50,24 @@ class DiffusionModule(nn.Module):
         batch_size,
         return_traj=False,
         class_label: Optional[torch.Tensor] = None,
-        guidance_scale: Optional[float] = 1.0,
+        guidance_scale: Optional[float] = 0.0,
     ):
         # 초기 노이즈 샘플링
         x_T = torch.randn([batch_size, 3, self.image_resolution, self.image_resolution]).to(self.device)
 
-        do_classifier_free_guidance = guidance_scale > 1.0
+        do_classifier_free_guidance = guidance_scale > 0.0
 
         if do_classifier_free_guidance:
 
             ######## TODO ########
-            # Assignment 2. Implement the classifier-free guidance.
+            # Assignment 2-3. Implement the classifier-free guidance.
             # Specifically, given a tensor of shape (batch_size,) containing class labels,
             # create a tensor of shape (2*batch_size,) where the first half is filled with zeros (i.e., null condition).
             assert class_label is not None
             assert len(class_label) == batch_size, f"len(class_label) != batch_size. {len(class_label)} != {batch_size}"
-            raise NotImplementedError("TODO")
+            class_label = class_label.to(self.device)
+            null_label = torch.zeros_like(class_label)
+            cat_labels = torch.cat([null_label, class_label], dim=0)
             #######################
 
         traj = [x_T]
@@ -74,10 +76,20 @@ class DiffusionModule(nn.Module):
             if do_classifier_free_guidance:
                 ######## TODO ########
                 # Assignment 2. Implement the classifier-free guidance.
-                raise NotImplementedError("TODO")
+                x_in = torch.cat([x_t, x_t], dim=0)  # (2B, C, H, W)
+                t_batch = torch.full((2 * batch_size,), t, device=self.device, dtype=torch.long)
+
+                eps_cat = self.network(x_in, timestep=t_batch, class_label=cat_labels)  # (2B, C, H, W)
+                eps_uncond, eps_cond = eps_cat.chunk(2, dim=0)  # 각 (B, C, H, W)
+
+                noise_pred = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
                 #######################
             else:
-                noise_pred = self.network(x_t, timestep=t.to(self.device))
+                noise_pred = self.network(
+                    x_t,
+                    timestep=t.to(self.device),
+                    class_label=class_label,
+                )
 
             # 우리가 구현한 step을 사용
             x_t_prev = self.var_scheduler.step(x_t, t, noise_pred)

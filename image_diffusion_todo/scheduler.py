@@ -103,9 +103,9 @@ class DDPMScheduler(BaseScheduler):
         # mean 계산
         mean = (x_t - eps_factor * eps_theta) / alpha_t.sqrt()
 
-        # t>1일 때만 노이즈 추가
+        # t>0일 때만 노이즈 추가
         # algorithm 2 of DDPM paper
-        if t > 1:
+        if int(t.item()) > 0:
             noise = torch.randn_like(x_t)
             sample_prev = mean + sigma_t * noise
         else:

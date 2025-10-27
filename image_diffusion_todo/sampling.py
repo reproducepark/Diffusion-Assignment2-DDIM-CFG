@@ -39,7 +39,7 @@ def main(args):
             assert ddpm.network.use_cfg, f"The model was not trained to support CFG."
             samples = ddpm.sample(
                 B,
-                class_label=torch.randint(1, 4, (B,)),
+                class_label=torch.randint(1, 4, (B,), device=device),
                 guidance_scale=args.cfg_scale,
             )
         else:
